@@ -1,0 +1,10 @@
+# Never commit credentials or tokens
+rclone.conf
+*.conf
+.env
+*token*
+*secret*
+
+# Local output
+logs/
+*.log
