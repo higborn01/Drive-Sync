@@ -1,0 +1,76 @@
+name: Sync drives
+
+on:
+  schedule:
+    - cron: "0 8 * * *"   # daily, 3 AM Eastern (4 AM in summer)
+  workflow_dispatch:
+    inputs:
+      first_run:
+        description: "First run: copy everything both ways, delete nothing"
+        type: boolean
+        default: false
+      dry_run:
+        description: "Dry run: change nothing, just log what would change (log is saved to OneDrive)"
+        type: boolean
+        default: false
+
+concurrency:
+  group: drive-sync
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  RCLONE_VERSION: v1.68.2
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install rclone (pinned, checksum verified)
+        run: |
+          cd "$RUNNER_TEMP"
+          zip="rclone-${RCLONE_VERSION}-linux-amd64.zip"
+          curl -fsSLO "https://downloads.rclone.org/${RCLONE_VERSION}/${zip}"
+          curl -fsSL "https://downloads.rclone.org/${RCLONE_VERSION}/SHA256SUMS" -o SHA256SUMS
+          grep " ${zip}\$" SHA256SUMS | sha256sum -c -
+          unzip -q "$zip"
+          sudo install -m 755 "rclone-${RCLONE_VERSION}-linux-amd64/rclone" /usr/local/bin/rclone
+          rclone version | head -1
+
+      - name: Write rclone config from secret
+        env:
+          RCLONE_CONF: ${{ secrets.RCLONE_CONF }}
+        run: |
+          if [ -z "$RCLONE_CONF" ]; then echo "Add the RCLONE_CONF secret first (see README)."; exit 1; fi
+          mkdir -p ~/.config/rclone
+          umask 077
+          printf '%s\n' "$RCLONE_CONF" > ~/.config/rclone/rclone.conf
+          sha256sum ~/.config/rclone/rclone.conf | cut -d' ' -f1 > "$RUNNER_TEMP/conf.sha"
+
+      - name: Sync
+        env:
+          FIRST_RUN: ${{ inputs.first_run || 'false' }}
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}
+        run: bash scripts/sync.sh
+
+      # Optional: rclone refreshes its sign-in tokens as it runs. If you add a GH_PAT secret,
+      # the refreshed config is saved back to RCLONE_CONF so the sign-in doesn't go stale.
+      - name: Save refreshed sign-in
+        if: always()
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+        run: |
+          [ -n "$GH_PAT" ] || { echo "No GH_PAT secret; skipping."; exit 0; }
+          [ -f ~/.config/rclone/rclone.conf ] || exit 0
+          new=$(sha256sum ~/.config/rclone/rclone.conf | cut -d' ' -f1)
+          if [ "$new" != "$(cat "$RUNNER_TEMP/conf.sha")" ]; then
+            GH_TOKEN="$GH_PAT" gh secret set RCLONE_CONF --repo "$GITHUB_REPOSITORY" < ~/.config/rclone/rclone.conf
+            echo "Sign-in refreshed and saved."
+          else
+            echo "Sign-in unchanged."
+          fi
